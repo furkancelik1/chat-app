@@ -31,7 +31,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const connectSocket = (token: string) => {
         if (socket) return;
 
-        const newSocket = io('https://chat-app-production-mtsl.onrender.com', {
+        const newSocket = io('https://chat-app-lpih.onrender.com', {
             auth: { token },
             autoConnect: true,
         });
