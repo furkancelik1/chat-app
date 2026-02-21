@@ -12,19 +12,9 @@ connectDB();
 
 const server = http.createServer(app);
 
-const allowedOrigins = process.env.CLIENT_URL
-  ? process.env.CLIENT_URL.split(",").map((s) => s.trim())
-  : ["http://localhost:3001", "http://localhost:3000"];
-
 const io = new Server(server, {
   cors: {
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.some((o) => o === "*" || o === origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
+    origin: process.env.CLIENT_URL || "http://localhost:3001",
     methods: ["GET", "POST"],
     credentials: true,
   },
