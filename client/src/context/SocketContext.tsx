@@ -54,6 +54,9 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             // Only add message if it belongs to current room or general notification
             // For simplicity, adding all and filtering in UI store
             addMessage(message);
+
+            // Tell the server this client has successfully received the message (Delivered state)
+            newSocket.emit('mark_as_delivered', message.room);
         });
 
         setSocket(newSocket);

@@ -21,7 +21,7 @@ const createRoom = async (req, res) => {
             let room = await Room.findOne({ name: privateRoomName });
 
             if (room) {
-                await room.populate('participants', 'username');
+                await room.populate('participants', 'username avatarUrl lastSeen');
                 return res.status(200).json(room); // Return existing room
             }
 
@@ -32,7 +32,7 @@ const createRoom = async (req, res) => {
                 participants: sortedIds
             });
 
-            await room.populate('participants', 'username');
+            await room.populate('participants', 'username avatarUrl lastSeen');
 
             return res.status(201).json(room);
         }
@@ -60,7 +60,7 @@ const createRoom = async (req, res) => {
                 admin: req.user._id
             });
 
-            await room.populate('participants', 'username');
+            await room.populate('participants', 'username avatarUrl lastSeen');
             return res.status(201).json(room);
         }
 
@@ -104,7 +104,7 @@ const getRooms = async (req, res) => {
                 { type: 'private', participants: userId },
                 { type: 'group', participants: userId }
             ]
-        }).populate('participants', 'username');
+        }).populate('participants', 'username avatarUrl lastSeen');
 
         res.status(200).json(rooms);
     } catch (error) {
@@ -141,8 +141,38 @@ const getMessagesByRoom = async (req, res) => {
     }
 };
 
+// @desc    Leave a group
+// @route   POST /api/rooms/:id/leave
+// @access  Private
+const leaveRoom = async (req, res) => {
+    try {
+        const roomId = req.params.id;
+        const userId = req.user._id;
+
+        const room = await Room.findById(roomId);
+
+        if (!room) {
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        if (room.type !== 'group') {
+            return res.status(400).json({ message: 'Can only leave group rooms' });
+        }
+
+        // Remove user from participants
+        room.participants = room.participants.filter(p => p.toString() !== userId.toString());
+
+        await room.save();
+        res.status(200).json({ message: 'Left group successfully', room });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 module.exports = {
     createRoom,
     getRooms,
-    getMessagesByRoom
+    getMessagesByRoom,
+    leaveRoom
 };

@@ -11,7 +11,7 @@ export interface Message {
     _id: string;
     sender: string; // ID of sender
     content: string;
-    type?: 'text' | 'image';
+    type?: 'text' | 'image' | 'audio';
     fileUrl?: string;
     room: string;
     isEdited?: boolean;
@@ -22,6 +22,7 @@ export interface Message {
         users: string[];
     }[];
     readBy?: string[];
+    deliveredTo?: string[];
     createdAt: string;
 }
 

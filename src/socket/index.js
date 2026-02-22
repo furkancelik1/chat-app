@@ -48,10 +48,19 @@ module.exports = (io) => {
             socket.to(room).emit('stop_typing', { userId, username });
         });
 
-        socket.on('disconnect', () => {
+        socket.on('disconnect', async () => {
             console.log(`Client disconnected: ${socket.id}`);
             onlineUsers.delete(userId);
             io.emit('online_users', Array.from(onlineUsers.values()));
+
+            try {
+                const User = require('../models/User');
+                await User.findByIdAndUpdate(userId, { lastSeen: new Date() });
+                // Broadcast that this user went offline so clients can update their local state immediately
+                io.emit('user_offline', { userId, lastSeen: new Date() });
+            } catch (err) {
+                console.error('Error updating lastSeen:', err);
+            }
         });
 
         // Handle incoming messages
@@ -129,5 +138,36 @@ module.exports = (io) => {
                 console.error('Error marking as read:', err);
             }
         });
+        // Handle marking messages as delivered
+        socket.on('mark_as_delivered', async (room) => {
+            try {
+                // Find messages in this room that are NOT sent by the current user
+                // and where the current user is NOT already in the deliveredTo array
+                const messagesToUpdate = await Message.find({
+                    room: room,
+                    sender: { $ne: userId },
+                    deliveredTo: { $ne: userId }
+                });
+
+                if (messagesToUpdate.length > 0) {
+                    const messageIds = messagesToUpdate.map(m => m._id);
+
+                    await Message.updateMany(
+                        { _id: { $in: messageIds } },
+                        { $push: { deliveredTo: userId } }
+                    );
+
+                    // Convert ObjectIds to strings for frontend comparison
+                    io.to(room).emit('messages_delivered', {
+                        roomId: room,
+                        messageIds: messageIds.map(id => id.toString()),
+                        deliveredToUserId: userId.toString()
+                    });
+                }
+            } catch (err) {
+                console.error('Error marking as delivered:', err);
+            }
+        });
+
     });
 };

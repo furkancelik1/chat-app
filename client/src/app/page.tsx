@@ -8,7 +8,7 @@ import api from '../lib/api';
 
 import NotificationManager from '../components/NotificationManager';
 import EmojiPicker from 'emoji-picker-react';
-import { Moon, Sun, Search, MoreVertical, Phone, Video, Smile, Paperclip, Send, ArrowLeft, Check, CheckCheck, Pencil, Trash2, Reply, Users, MessageSquare, UserCircle2, X, ChevronDown } from 'lucide-react';
+import { Moon, Sun, Search, MoreVertical, Phone, Video, Smile, Paperclip, Send, ArrowLeft, Check, CheckCheck, Pencil, Trash2, Reply, Users, MessageSquare, UserCircle2, X, ChevronDown, Mic, Loader2 } from 'lucide-react';
 
 // Helper: string'e dönüştür (ObjectId vs string karşılaştırması için)
 function toStr(val: any): string {
@@ -41,7 +41,8 @@ export default function Home() {
   const {
     user, rooms, activeRoom, messages, onlineUsers,
     setRooms, setActiveRoom, clearUnread, updateMessage,
-    addMessage, updateUser, updateMessagesRead, theme, setTheme
+    addMessage, setMessages, updateUser, updateMessagesRead, theme, setTheme,
+    updateParticipantStatus, updateMessagesDelivered, wallpaper, setWallpaper
   } = useChatStore();
   const { socket } = useSocket();
 
@@ -60,6 +61,29 @@ export default function Home() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
+
+  const [showChatSearch, setShowChatSearch] = useState(false);
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [showChatOptions, setShowChatOptions] = useState(false);
+  const [showWallpaperModal, setShowWallpaperModal] = useState(false);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [isUploadingAudio, setIsUploadingAudio] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<any>(null);
+
+  const WALLPAPER_OPTIONS = [
+    { name: 'Default Dark', value: "url('/chat-bg.png')" },
+    { name: 'Solid Dark', value: "none" },
+    { name: 'Midnight Blue', value: "linear-gradient(to right bottom, #1e3a8a, #312e81)" },
+    { name: 'Emerald Forest', value: "linear-gradient(to top right, #047857, #064e3b)" },
+    { name: 'Deep Purple', value: "linear-gradient(to right, #4c1d95, #7e22ce)" },
+    { name: 'Abyss', value: "linear-gradient(135deg, #1f2937, #111827)" },
+    { name: 'Royal', value: "radial-gradient(circle, #5b21b6, #312e81)" }
+  ];
+
   const typingTimerRef = useRef<any>(null);
 
   // Auth
@@ -83,14 +107,22 @@ export default function Home() {
     socket.on('messages_read', ({ messageIds, readByUserId }: { roomId: string, messageIds: string[], readByUserId: string }) => {
       updateMessagesRead(messageIds, readByUserId);
     });
+    socket.on('messages_delivered', ({ messageIds, deliveredToUserId }: { roomId: string, messageIds: string[], deliveredToUserId: string }) => {
+      updateMessagesDelivered(messageIds, deliveredToUserId);
+    });
+    socket.on('user_offline', ({ userId, lastSeen }: { userId: string, lastSeen: string }) => {
+      updateParticipantStatus(userId, lastSeen);
+    });
 
     return () => {
       socket.off('typing');
       socket.off('stop_typing');
       socket.off('message_updated');
       socket.off('messages_read');
+      socket.off('messages_delivered');
+      socket.off('user_offline');
     };
-  }, [socket, updateMessage, updateMessagesRead]);
+  }, [socket, updateMessage, updateMessagesRead, updateMessagesDelivered, updateParticipantStatus]);
 
   // Typing emitter with debounce
   const handleTyping = useCallback(() => {
@@ -118,6 +150,91 @@ export default function Home() {
       res.data.forEach((r: any) => socket.emit('join_room', r.name));
     }).catch(console.error);
   }, [user, socket, setRooms]);
+
+  // --- Voice Recording Logic ---
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstart = () => {
+        setIsRecording(true);
+        setRecordingTime(0);
+        recordingTimerRef.current = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
+      };
+
+      mediaRecorder.start();
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+      alert('Could not access microphone.');
+    }
+  };
+
+  const stopAndSendRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.onstop = async () => {
+        clearInterval(recordingTimerRef.current);
+        setIsRecording(false);
+        setIsUploadingAudio(true);
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop()); // Stop mic light
+
+        if (audioBlob.size > 0 && activeRoom) {
+          try {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'voice-message.webm');
+
+            const res = await api.post('/upload', formData, {
+              headers: {
+                'Content-Type': 'multipart/form-data',
+                Authorization: `Bearer ${user?.token}`
+              }
+            });
+
+            socket?.emit('message', {
+              room: activeRoom.name,
+              content: 'Sent a voice message',
+              type: 'audio',
+              fileUrl: res.data.fileUrl
+            });
+          } catch (err) {
+            console.error('Failed to upload audio:', err);
+            alert('Failed to send voice message');
+          }
+        }
+        setIsUploadingAudio(false);
+      };
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.onstop = () => {
+        clearInterval(recordingTimerRef.current);
+        setIsRecording(false);
+        mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
+      };
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const formatRecordingTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,7 +266,11 @@ export default function Home() {
     clearUnread(room._id);
     setActiveRoom(room);
     setShowSidebar(false);
+    setShowChatSearch(false);
+    setChatSearchQuery('');
+    setShowChatOptions(false);
     socket?.emit('join_room', room.name);
+    socket?.emit('mark_as_delivered', room.name);
     socket?.emit('mark_as_read', room.name);
   };
 
@@ -174,15 +295,33 @@ export default function Home() {
   const isOnline = (userId: string) => onlineUsers.some(u => u.id === userId);
 
   if (!user) return (
-    <div className="flex h-screen items-center justify-center bg-white dark:bg-[#111b21]">
+    <div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-slate-950">
       <div className="animate-spin w-8 h-8 border-4 border-green-500 border-t-transparent rounded-full" />
     </div>
   );
 
   // Aktif odadaki mesajları getir
-  const activeMessages = activeRoom
+  let activeMessages = activeRoom
     ? messages.filter(m => m.room === activeRoom.name)
     : [];
+
+  if (chatSearchQuery) {
+    activeMessages = activeMessages.filter(m =>
+      m.content?.toLowerCase().includes(chatSearchQuery.toLowerCase())
+    );
+  }
+
+  // Utils for formatting last seen dates
+  const formatLastSeen = (dateString?: string) => {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const now = new Date();
+    const isToday = date.getDate() === now.getDate() && date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear();
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (isToday) return `last seen today at ${timeStr}`;
+    const dateStr = date.toLocaleDateString();
+    return `last seen ${dateStr} at ${timeStr}`;
+  };
 
   // Header bilgisi
   const getHeaderInfo = () => {
@@ -192,7 +331,11 @@ export default function Home() {
       const otherName = other?.username || 'Unknown';
       const otherId = other?._id || other;
       const online = isOnline(toStr(otherId));
-      return { name: otherName, subtitle: online ? 'online' : '', isOnlineUser: online, avatar: other?.avatarUrl };
+      let subtitle = online ? 'online' : '';
+      if (!online && other?.lastSeen) {
+        subtitle = formatLastSeen(other.lastSeen);
+      }
+      return { name: otherName, subtitle, isOnlineUser: online, avatar: other?.avatarUrl };
     }
     if (activeRoom.type === 'group') {
       const count = activeRoom.participants?.length || 0;
@@ -203,49 +346,49 @@ export default function Home() {
   const headerInfo = getHeaderInfo();
 
   return (
-    <div className="flex h-screen bg-[#111b21] overflow-hidden">
+    <div className="flex h-screen bg-gray-50 dark:bg-slate-950 overflow-hidden">
       <NotificationManager />
 
       {/* ========== SIDEBAR ========== */}
       <div className={`
         ${showSidebar ? 'flex' : 'hidden'} md:flex
         w-full md:w-[380px] lg:w-[400px]
-        bg-[#111b21] flex-col shrink-0
-        border-r border-[#202c33]
+        bg-gray-50 dark:bg-slate-950 flex-col shrink-0
+        border-r border-gray-200 dark:border-white/10
       `}>
 
         {/* Sidebar Header */}
-        <div className="px-4 py-3 bg-[#202c33] flex items-center justify-between">
+        <div className="px-4 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md flex items-center justify-between">
           <div className="flex items-center gap-3">
             {/* Avatar */}
             <button onClick={() => setShowProfileModal(true)} className="shrink-0 touch-manipulation">
               {user.avatarUrl ? (
                 <img src={user.avatarUrl} alt="Me" className="h-10 w-10 rounded-full object-cover" />
               ) : (
-                <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-white font-bold text-lg">
+                <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-gray-900 dark:text-white font-bold text-lg">
                   {user.username.charAt(0).toUpperCase()}
                 </div>
               )}
             </button>
-            <span className="text-white font-semibold text-base hidden sm:block">{user.username}</span>
+            <span className="text-gray-900 dark:text-white font-semibold text-base hidden sm:block">{user.username}</span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowSearch(!showSearch)}
-              className="p-2 text-[#aebac1] hover:text-white hover:bg-[#2a3942] rounded-full transition touch-manipulation"
+              className="p-2 text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10 rounded-full transition touch-manipulation"
             >
               <Search size={20} />
             </button>
             <button
               onClick={() => setShowGroupModal(true)}
-              className="p-2 text-[#aebac1] hover:text-white hover:bg-[#2a3942] rounded-full transition touch-manipulation"
+              className="p-2 text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10 rounded-full transition touch-manipulation"
               title="New Group"
             >
               <Users size={20} />
             </button>
             <button
               onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-              className="p-2 text-[#aebac1] hover:text-white hover:bg-[#2a3942] rounded-full transition touch-manipulation"
+              className="p-2 text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10 rounded-full transition touch-manipulation"
             >
               {theme === 'light' ? <Moon size={20} /> : <Sun size={20} />}
             </button>
@@ -254,18 +397,18 @@ export default function Home() {
 
         {/* Search Bar */}
         {showSearch && (
-          <div className="px-3 py-2 bg-[#111b21]">
-            <div className="flex items-center bg-[#202c33] rounded-lg px-3 gap-2">
-              <Search size={16} className="text-[#aebac1] shrink-0" />
+          <div className="px-3 py-2 bg-gray-50 dark:bg-slate-950">
+            <div className="flex items-center bg-white/80 dark:bg-white dark:bg-slate-900/80 backdrop-blur-md rounded-2xl px-3 gap-2">
+              <Search size={16} className="text-gray-600 dark:text-slate-300 shrink-0" />
               <input
                 type="text"
                 placeholder="Search or start new chat"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="flex-1 bg-transparent py-2 text-sm text-white placeholder-[#8696a0] focus:outline-none"
+                className="flex-1 bg-transparent py-2 text-sm text-gray-900 dark:text-white placeholder-[#8696a0] focus:outline-none"
               />
               {searchQuery && (
-                <button onClick={() => setSearchQuery('')} className="text-[#aebac1]"><X size={16} /></button>
+                <button onClick={() => setSearchQuery('')} className="text-gray-600 dark:text-slate-300"><X size={16} /></button>
               )}
             </div>
           </div>
@@ -277,18 +420,18 @@ export default function Home() {
           {/* AI Bot - pinned */}
           <button
             onClick={() => handleJoinRoom({ _id: 'ai-chat', name: 'ai-chat', description: 'Chat with AI', type: 'public' })}
-            className={`w-full flex items-center px-3 py-3 gap-3 hover:bg-[#2a3942] transition-colors touch-manipulation ${activeRoom?.name === 'ai-chat' ? 'bg-[#2a3942]' : ''}`}
+            className={`w-full flex items-center px-3 py-3 gap-3 hover:bg-gray-200 dark:hover:bg-white/10 transition-all duration-300 ease-in-out hover:scale-[1.02] touch-manipulation ${activeRoom?.name === 'ai-chat' ? 'bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm' : ''}`}
           >
             <div className="h-12 w-12 rounded-full bg-purple-600 flex items-center justify-center text-2xl shrink-0">🤖</div>
-            <div className="flex-1 min-w-0 text-left border-b border-[#202c33] pb-3">
+            <div className="flex-1 min-w-0 text-left border-b border-gray-200 dark:border-white/10 pb-3">
               <div className="flex justify-between items-baseline">
-                <span className="text-white font-medium text-sm">AI Bot</span>
-                <span className="text-[#8696a0] text-xs shrink-0 ml-2">
+                <span className="text-gray-900 dark:text-white font-medium text-sm">AI Bot</span>
+                <span className="text-gray-500 dark:text-slate-400 text-xs shrink-0 ml-2">
                   {getLastMessage('ai-chat') ? formatLastSeen(getLastMessage('ai-chat')!.createdAt) : ''}
                 </span>
               </div>
               <div className="flex justify-between items-center mt-0.5">
-                <span className="text-[#8696a0] text-xs truncate">Ask me anything...</span>
+                <span className="text-gray-500 dark:text-slate-400 text-xs truncate">Ask me anything...</span>
               </div>
             </div>
           </button>
@@ -316,35 +459,35 @@ export default function Home() {
               <button
                 key={room._id}
                 onClick={() => handleJoinRoom(room)}
-                className={`w-full flex items-center px-3 py-3 gap-3 hover:bg-[#2a3942] transition-colors touch-manipulation ${isActive ? 'bg-[#2a3942]' : ''}`}
+                className={`w-full flex items-center px-3 py-3 gap-3 hover:bg-gray-200 dark:hover:bg-white/10 transition-all duration-300 ease-in-out hover:scale-[1.02] touch-manipulation ${isActive ? 'bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm' : ''}`}
               >
                 {/* Avatar */}
                 <div className="relative shrink-0">
                   {isPrivate && other?.avatarUrl ? (
                     <img src={other.avatarUrl} alt={label} className="h-12 w-12 rounded-full object-cover" />
                   ) : (
-                    <div className={`h-12 w-12 rounded-full flex items-center justify-center text-white font-bold text-lg
-                      ${isGroup ? 'bg-[#6b7280]' : 'bg-[#00a884]'}`}>
-                      {isGroup ? <Users size={22} /> : label.charAt(0).toUpperCase()}
+                    <div className={`h-12 w-12 rounded-full flex items-center justify-center text-gray-900 dark:text-white font-bold text-lg
+                      ${isGroup ? 'bg-[#6b7280]' : 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]'}`}>
+                      {isGroup ? <Users size={22} className="text-white" /> : label.charAt(0).toUpperCase()}
                     </div>
                   )}
                   {online && (
-                    <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-[#111b21]" />
+                    <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white dark:border-slate-950" />
                   )}
                 </div>
 
                 {/* Info */}
-                <div className="flex-1 min-w-0 text-left border-b border-[#202c33] pb-3">
+                <div className="flex-1 min-w-0 text-left border-b border-gray-200 dark:border-white/10 pb-3">
                   <div className="flex justify-between items-baseline">
-                    <span className="text-white font-medium text-sm truncate mr-2">{label}</span>
-                    <span className={`text-xs shrink-0 ${unread > 0 ? 'text-[#00a884]' : 'text-[#8696a0]'}`}>
+                    <span className="text-gray-900 dark:text-white font-medium text-sm truncate mr-2">{label}</span>
+                    <span className={`text-xs shrink-0 ${unread > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-500 dark:text-slate-400'}`}>
                       {lastMsg ? formatLastSeen(lastMsg.createdAt) : ''}
                     </span>
                   </div>
                   <div className="flex justify-between items-center mt-0.5">
-                    <span className="text-[#8696a0] text-xs truncate mr-2">{lastMsgText}</span>
+                    <span className="text-gray-500 dark:text-slate-400 text-xs truncate mr-2">{lastMsgText}</span>
                     {unread > 0 && (
-                      <span className="shrink-0 min-w-[20px] h-5 bg-[#00a884] text-white text-[11px] font-bold rounded-full flex items-center justify-center px-1.5">
+                      <span className="shrink-0 min-w-[20px] h-5 bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] text-white text-[11px] font-bold rounded-full flex items-center justify-center px-1.5">
                         {unread > 99 ? '99+' : unread}
                       </span>
                     )}
@@ -355,13 +498,13 @@ export default function Home() {
           })}
 
           {filteredRooms.length === 0 && searchQuery && (
-            <div className="text-center text-[#8696a0] text-sm py-12">No chats found</div>
+            <div className="text-center text-gray-500 dark:text-slate-400 text-sm py-12">No chats found</div>
           )}
 
           {/* Online Users Section */}
           {onlineUsers.filter(u => u.id !== user._id).length > 0 && !searchQuery && (
             <div className="mt-2">
-              <div className="px-4 py-2 text-xs font-semibold text-[#8696a0] uppercase tracking-wider">
+              <div className="px-4 py-2 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase tracking-wider">
                 Online — {onlineUsers.filter(u => u.id !== user._id).length}
               </div>
               {onlineUsers.filter(u => u.id !== user._id).map(u => (
@@ -376,13 +519,13 @@ export default function Home() {
                       handleJoinRoom(room);
                     }).catch(() => alert('Failed to start chat'));
                   }}
-                  className="w-full flex items-center px-3 py-2.5 gap-3 hover:bg-[#2a3942] transition-colors touch-manipulation"
+                  className="w-full flex items-center px-3 py-2.5 gap-3 hover:bg-gray-200 dark:hover:bg-white/10 transition-all duration-300 ease-in-out hover:scale-[1.02] touch-manipulation"
                 >
                   <div className="relative shrink-0">
-                    <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-white font-bold">
+                    <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-gray-900 dark:text-white font-bold">
                       {u.username.charAt(0).toUpperCase()}
                     </div>
-                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-[#111b21]" />
+                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white dark:border-slate-950" />
                   </div>
                   <span className="text-[#d1d7db] text-sm">{u.username}</span>
                 </button>
@@ -399,10 +542,10 @@ export default function Home() {
         {activeRoom ? (
           <>
             {/* Chat Header */}
-            <div className="px-3 py-2 bg-[#202c33] flex items-center justify-between shadow-sm z-10">
+            <div className="px-3 py-2 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md flex items-center justify-between shadow-sm z-10 w-full">
               <div className="flex items-center gap-3">
                 <button
-                  className="md:hidden p-1 text-[#aebac1] hover:text-white touch-manipulation"
+                  className="md:hidden p-1 text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white touch-manipulation"
                   onClick={() => setShowSidebar(true)}
                 >
                   <ArrowLeft size={22} />
@@ -413,43 +556,116 @@ export default function Home() {
                   {activeRoom.type === 'private' && (headerInfo as any).avatar ? (
                     <img src={(headerInfo as any).avatar} alt="" className="h-10 w-10 rounded-full object-cover" />
                   ) : (
-                    <div className={`h-10 w-10 rounded-full flex items-center justify-center text-white font-bold
-                      ${activeRoom.type === 'group' ? 'bg-[#6b7280]' : activeRoom.name === 'ai-chat' ? 'bg-purple-600' : 'bg-[#00a884]'}`}>
+                    <div className={`h-10 w-10 rounded-full flex items-center justify-center text-gray-900 dark:text-white font-bold
+                      ${activeRoom.type === 'group' ? 'bg-[#6b7280]' : activeRoom.name === 'ai-chat' ? 'bg-purple-600' : 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]'}`}>
                       {activeRoom.name === 'ai-chat' ? '🤖' :
-                        activeRoom.type === 'group' ? <Users size={18} /> :
+                        activeRoom.type === 'group' ? <Users size={18} className="text-white" /> :
                           headerInfo.name.charAt(0).toUpperCase()}
                     </div>
                   )}
                   {headerInfo.isOnlineUser && (
-                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-[#202c33]" />
+                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-gray-200 dark:border-white/10" />
                   )}
                 </div>
 
-                <div>
-                  <h2 className="text-white font-semibold text-sm leading-tight">{headerInfo.name}</h2>
+                <div className="min-w-0">
+                  <h2 className="text-gray-900 dark:text-white font-semibold text-sm leading-tight truncate">{headerInfo.name}</h2>
                   {headerInfo.subtitle && (
-                    <p className="text-[#8696a0] text-xs">{headerInfo.subtitle}</p>
+                    <p className="text-gray-500 dark:text-slate-400 text-xs truncate">{headerInfo.subtitle}</p>
                   )}
                   {typingUsers.length > 0 && (
-                    <p className="text-[#00a884] text-xs animate-pulse">
+                    <p className="text-indigo-600 dark:text-indigo-400 text-xs animate-pulse truncate">
                       {typingUsers.join(', ')} typing...
                     </p>
                   )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-1">
-                <button className="p-2 text-[#aebac1] hover:text-white hover:bg-[#2a3942] rounded-full transition touch-manipulation">
+              <div className="flex items-center gap-1 shrink-0 ml-2">
+                <button
+                  onClick={() => { setShowChatSearch(!showChatSearch); setShowChatOptions(false); }}
+                  className={`p-2 rounded-full transition touch-manipulation ${showChatSearch ? 'text-gray-900 dark:text-white bg-gray-200 dark:bg-white/10' : 'text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10'}`}
+                >
                   <Search size={20} />
                 </button>
-                <button className="p-2 text-[#aebac1] hover:text-white hover:bg-[#2a3942] rounded-full transition touch-manipulation">
-                  <MoreVertical size={20} />
-                </button>
+                <div className="relative">
+                  <button
+                    onClick={() => { setShowChatOptions(!showChatOptions); setShowChatSearch(false); }}
+                    className={`p-2 rounded-full transition touch-manipulation ${showChatOptions ? 'text-gray-900 dark:text-white bg-gray-200 dark:bg-white/10' : 'text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-white/10'}`}
+                  >
+                    <MoreVertical size={20} />
+                  </button>
+                  {showChatOptions && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowChatOptions(false)}></div>
+                      <div className="absolute top-12 right-0 w-48 bg-white dark:bg-slate-800 border border-gray-200 dark:border-white/10 rounded-xl shadow-xl z-50 overflow-hidden py-1">
+                        <button
+                          onClick={() => { setShowWallpaperModal(true); setShowChatOptions(false); }}
+                          className="w-full text-left px-4 py-2.5 text-sm text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-white transition-colors border-b border-gray-200 dark:border-white/10"
+                        >
+                          Change wallpaper
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm('Are you sure you want to clear this chat?')) {
+                              api.delete(`/messages/room/${activeRoom.name}`, { headers: { Authorization: `Bearer ${user.token}` } })
+                                .then(() => { setMessages(messages.filter(m => m.room !== activeRoom.name)); setShowChatOptions(false); })
+                                .catch(() => alert('Failed to clear chat'));
+                            }
+                          }}
+                          className="w-full text-left px-4 py-2.5 text-sm text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-white/10 hover:text-gray-900 dark:text-white transition-colors"
+                        >
+                          Clear chat
+                        </button>
+                        {activeRoom.type === 'group' && (
+                          <button
+                            onClick={() => {
+                              if (confirm('Are you sure you want to leave this group?')) {
+                                api.post(`/rooms/${activeRoom._id}/leave`, {}, { headers: { Authorization: `Bearer ${user.token}` } })
+                                  .then(() => {
+                                    setRooms(rooms.filter(r => r._id !== activeRoom._id));
+                                    setActiveRoom(null);
+                                    setShowChatOptions(false);
+                                  })
+                                  .catch(() => alert('Failed to leave group'));
+                              }
+                            }}
+                            className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+                          >
+                            Leave group
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
+            {/* In-chat Search Bar */}
+            {showChatSearch && (
+              <div className="px-3 py-2 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-white/10 shadow-sm z-10 transition-all">
+                <div className="flex items-center bg-gray-50 dark:bg-slate-950 rounded-lg px-3 gap-2">
+                  <Search size={16} className="text-gray-500 dark:text-slate-400 shrink-0" />
+                  <input
+                    type="text"
+                    placeholder="Search messages..."
+                    value={chatSearchQuery}
+                    onChange={e => setChatSearchQuery(e.target.value)}
+                    className="flex-1 bg-transparent py-2 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none border-none"
+                    autoFocus
+                  />
+                  {chatSearchQuery && (
+                    <button onClick={() => setChatSearchQuery('')} className="text-gray-500 dark:text-slate-400 hover:text-slate-200">
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-1" style={{ backgroundImage: "url('/chat-bg.png')" }}>
+            <div className={`flex-1 overflow-y-auto px-4 py-3 space-y-1 ${wallpaper === 'none' ? 'bg-gray-100 dark:bg-slate-900' : ''}`} style={wallpaper !== 'none' ? { backgroundImage: wallpaper, backgroundSize: wallpaper.includes('url') ? 'auto' : 'cover' } : {}}>
               {activeMessages.map((msg, idx) => {
                 const senderIdStr = toStr(typeof msg.sender === 'object' ? (msg.sender as any)._id : msg.sender);
                 const isMe = senderIdStr === user._id;
@@ -462,9 +678,13 @@ export default function Home() {
                 if (!senderObj) senderObj = onlineUsers.find(ou => ou.id === senderIdStr);
                 const senderName = isMe ? user.username : (isBot ? 'AI Bot' : (senderObj?.username || `User ${senderIdStr.slice(-4)}`));
 
-                // Tik durumu: readBy array'ini string olarak karşılaştır
+                // Check status: readBy array vs user._id
                 const readByOthers = msg.readBy
                   ? msg.readBy.filter(id => toStr(id) !== user._id).length > 0
+                  : false;
+
+                const deliveredToOthers = msg.deliveredTo
+                  ? msg.deliveredTo.filter(id => toStr(id) !== user._id).length > 0
                   : false;
 
                 // Aynı sender arka arkaya mı?
@@ -474,8 +694,8 @@ export default function Home() {
                 if (msg.isDeleted) {
                   return (
                     <div key={msg._id || idx} className={`flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`}>
-                      <div className={`flex items-center gap-1 px-3 py-2 rounded-lg text-xs italic text-[#8696a0] border border-[#8696a0]/30
-                        ${isMe ? 'bg-[#005c4b]' : 'bg-[#202c33]'}`}>
+                      <div className={`flex items-center gap-1 px-3 py-2 rounded-2xl text-xs italic text-gray-500 dark:text-slate-400 border border-gray-200 dark:border-white/10
+                        ${isMe ? 'bg-indigo-600 shadow-md border border-indigo-500/30' : 'bg-white/80 dark:bg-white dark:bg-slate-900/80 backdrop-blur-md'}`}>
                         <Trash2 size={12} />
                         This message was deleted
                       </div>
@@ -490,7 +710,7 @@ export default function Home() {
                     {!isMe && (
                       <div className="shrink-0 w-8 self-end">
                         {!sameSenderAsPrev ? (
-                          <div className={`h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold text-white
+                          <div className={`h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold text-gray-900 dark:text-white
                             ${isBot ? 'bg-purple-500' : 'bg-[#6b7280]'}`}>
                             {isBot ? '🤖' : senderName.charAt(0).toUpperCase()}
                           </div>
@@ -501,7 +721,7 @@ export default function Home() {
                     {/* Bubble */}
                     <div className={`relative max-w-[80%] sm:max-w-[65%] ${isMe ? 'items-end' : 'items-start'} flex flex-col`}>
                       {/* Message action buttons (hover) */}
-                      <div className={`absolute -top-9 ${isMe ? 'right-0' : 'left-8'} hidden group-hover:flex gap-0.5 bg-[#233138] border border-[#3d4a52] shadow-lg rounded-lg p-1 z-20 items-center`}>
+                      <div className={`absolute -top-9 ${isMe ? 'right-0' : 'left-8'} hidden group-hover:flex gap-0.5 bg-white/95 dark:bg-white dark:bg-slate-800/95 backdrop-blur-xl border border-gray-200 dark:border-white/10 shadow-2xl border border-gray-200 dark:border-white/10 shadow-lg rounded-2xl p-1 z-20 items-center`}>
                         {['👍', '❤️', '😂', '😮', '😢'].map(emoji => (
                           <button key={emoji} onClick={() => {
                             api.post(`/messages/${msg._id}/react`, { emoji }, {
@@ -509,14 +729,14 @@ export default function Home() {
                             }).then(res => updateMessage(res.data)).catch(() => { });
                           }} className="text-base hover:scale-125 transition-transform p-1 touch-manipulation">{emoji}</button>
                         ))}
-                        <div className="w-px h-5 bg-[#3d4a52] mx-0.5" />
-                        <button onClick={() => setReplyingTo(msg)} className="p-1.5 hover:bg-[#3d4a52] rounded text-[#aebac1] touch-manipulation" title="Reply">
+                        <div className="w-px h-5 bg-gray-200 dark:bg-white/10 mx-0.5" />
+                        <button onClick={() => setReplyingTo(msg)} className="p-1.5 hover:bg-gray-200 dark:hover:bg-white/10 rounded text-gray-600 dark:text-slate-300 touch-manipulation" title="Reply">
                           <Reply size={14} />
                         </button>
                         {isMe && (
                           <>
                             <button onClick={() => { setEditingMessage(msg); setInput(msg.content); inputRef.current?.focus(); }}
-                              className="p-1.5 hover:bg-[#3d4a52] rounded text-[#aebac1] touch-manipulation" title="Edit">
+                              className="p-1.5 hover:bg-gray-200 dark:hover:bg-white/10 rounded text-gray-600 dark:text-slate-300 touch-manipulation" title="Edit">
                               <Pencil size={14} />
                             </button>
                             <button onClick={() => {
@@ -531,39 +751,41 @@ export default function Home() {
                         )}
                       </div>
 
-                      <div className={`relative px-3 py-1.5 rounded-lg shadow-sm text-sm
+                      <div className={`relative px-3 py-1.5 rounded-2xl shadow-sm text-sm
                         ${isMe
-                          ? 'bg-[#005c4b] text-[#e9edef] rounded-tr-none'
-                          : 'bg-[#202c33] text-[#e9edef] rounded-tl-none'
+                          ? 'bg-indigo-600 shadow-md border border-indigo-500/30 text-gray-800 dark:text-slate-100 rounded-tr-none'
+                          : 'bg-white/80 dark:bg-white dark:bg-slate-900/80 backdrop-blur-md text-gray-800 dark:text-slate-100 rounded-tl-none'
                         }
                         ${sameSenderAsPrev && !isMe ? 'rounded-tl-lg' : ''}
                         ${sameSenderAsPrev && isMe ? 'rounded-tr-lg' : ''}
                       `}>
                         {/* Sender name in groups */}
                         {!isMe && !sameSenderAsPrev && (activeRoom.type === 'group' || activeRoom.type === 'public') && (
-                          <div className="text-[11px] font-semibold mb-0.5 text-[#00a884]">{senderName}</div>
+                          <div className="text-[11px] font-semibold mb-0.5 text-indigo-600 dark:text-indigo-400">{senderName}</div>
                         )}
 
                         {/* Reply block */}
                         {msg.replyTo && (
-                          <div className={`mb-1.5 px-2 py-1 rounded border-l-[3px] text-xs ${isMe ? 'border-[#00a884] bg-[#004c3f]' : 'border-[#8696a0] bg-[#182229]'}`}>
-                            <div className="font-semibold text-[#00a884] text-[11px] mb-0.5">
+                          <div className={`mb-1.5 px-2 py-1 rounded border-l-[3px] text-xs ${isMe ? 'border-indigo-500 bg-indigo-900/40 border-indigo-500/50' : 'border-[#8696a0] bg-white dark:bg-gray-100/50 dark:bg-slate-900/50'}`}>
+                            <div className="font-semibold text-indigo-600 dark:text-indigo-400 text-[11px] mb-0.5">
                               {typeof msg.replyTo === 'object' ? (msg.replyTo as any).sender?.username || 'Reply' : 'Reply'}
                             </div>
-                            <div className="text-[#8696a0] truncate text-[11px]">
+                            <div className="text-gray-500 dark:text-slate-400 truncate text-[11px]">
                               {typeof msg.replyTo === 'object' ? (msg.replyTo as any).content : '...'}
                             </div>
                           </div>
                         )}
 
-                        {/* Image */}
+                        {/* Image / Audio / Text */}
                         {msg.type === 'image' && msg.fileUrl ? (
                           <img
                             src={msg.fileUrl}
                             alt="Shared"
-                            className="max-w-full rounded-md mb-1 cursor-pointer hover:opacity-90 transition max-h-64 object-cover"
+                            className="max-w-full rounded-xl mb-1 cursor-pointer hover:opacity-90 transition max-h-64 object-cover"
                             onClick={() => window.open(msg.fileUrl, '_blank')}
                           />
+                        ) : msg.type === 'audio' && msg.fileUrl ? (
+                          <audio controls src={msg.fileUrl} className="max-w-[200px] sm:max-w-[250px] mb-1" />
                         ) : (
                           <p className="whitespace-pre-wrap break-words leading-relaxed">
                             {msg.content}
@@ -573,12 +795,14 @@ export default function Home() {
 
                         {/* Time + Ticks */}
                         <div className="flex items-center justify-end gap-1 mt-0.5">
-                          <span className="text-[10px] text-[#8696a0]">{formatTime(msg.createdAt)}</span>
+                          <span className="text-[10px] text-gray-500 dark:text-slate-400">{formatTime(msg.createdAt)}</span>
                           {isMe && (
                             readByOthers ? (
-                              <CheckCheck size={16} className="text-[#53bdeb] shrink-0" />
+                              <CheckCheck size={16} className="text-sky-400 shrink-0" />
+                            ) : deliveredToOthers ? (
+                              <CheckCheck size={16} className="text-gray-500 dark:text-slate-400 shrink-0" />
                             ) : (
-                              <CheckCheck size={16} className="text-[#8696a0] shrink-0" />
+                              <Check size={16} className="text-gray-500 dark:text-slate-400 shrink-0" />
                             )
                           )}
                         </div>
@@ -594,10 +818,10 @@ export default function Home() {
                                     headers: { Authorization: `Bearer ${user?.token}` }
                                   }).then(res => updateMessage(res.data)).catch(() => { });
                                 }}
-                                  className={`text-[11px] px-1.5 py-0.5 rounded-full border flex items-center gap-0.5 transition-colors touch-manipulation
-                                    ${hasReacted ? 'bg-[#00a884]/20 border-[#00a884]/50' : 'bg-[#182229] border-[#3d4a52]'}`}>
+                                  className={`text-[11px] px-1.5 py-0.5 rounded-full border flex items-center gap-0.5 transition-all duration-300 ease-in-out hover:scale-[1.02] touch-manipulation
+                                    ${hasReacted ? 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]/20 border-indigo-500/50' : 'bg-white dark:bg-gray-100/50 dark:bg-slate-900/50 border-gray-200 dark:border-white/10'}`}>
                                   <span>{r.emoji}</span>
-                                  <span className="font-semibold text-[#e9edef]">{r.users.length}</span>
+                                  <span className="font-semibold text-gray-800 dark:text-slate-100">{r.users.length}</span>
                                 </button>
                               );
                             })}
@@ -612,17 +836,17 @@ export default function Home() {
             </div>
 
             {/* Input Area */}
-            <div className="px-2 py-2 sm:px-4 sm:py-3 bg-[#202c33]">
+            <div className="px-2 py-2 sm:px-4 sm:py-3 bg-white/80 dark:bg-white dark:bg-slate-900/80 backdrop-blur-md">
               {/* Reply preview */}
               {replyingTo && (
-                <div className="flex items-center justify-between bg-[#2a3942] px-3 py-2 mb-2 rounded-lg border-l-4 border-[#00a884]">
+                <div className="flex items-center justify-between bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm px-3 py-2 mb-2 rounded-2xl border-l-4 border-indigo-500">
                   <div className="min-w-0 mr-2">
-                    <div className="text-[#00a884] text-xs font-semibold">
+                    <div className="text-indigo-600 dark:text-indigo-400 text-xs font-semibold">
                       {toStr(typeof replyingTo.sender === 'object' ? (replyingTo.sender as any)._id : replyingTo.sender) === user._id ? 'You' : 'Reply'}
                     </div>
-                    <div className="text-[#8696a0] text-xs truncate">{replyingTo.content}</div>
+                    <div className="text-gray-500 dark:text-slate-400 text-xs truncate">{replyingTo.content}</div>
                   </div>
-                  <button onClick={() => setReplyingTo(null)} className="text-[#8696a0] hover:text-white shrink-0 p-1 touch-manipulation">
+                  <button onClick={() => setReplyingTo(null)} className="text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:text-white shrink-0 p-1 touch-manipulation">
                     <X size={16} />
                   </button>
                 </div>
@@ -630,12 +854,12 @@ export default function Home() {
 
               {/* Edit preview */}
               {editingMessage && (
-                <div className="flex items-center justify-between bg-[#2a3942] px-3 py-2 mb-2 rounded-lg border-l-4 border-yellow-500">
+                <div className="flex items-center justify-between bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm px-3 py-2 mb-2 rounded-2xl border-l-4 border-yellow-500">
                   <div className="min-w-0 mr-2">
                     <div className="text-yellow-400 text-xs font-semibold flex items-center gap-1"><Pencil size={11} /> Editing</div>
-                    <div className="text-[#8696a0] text-xs truncate">{editingMessage.content}</div>
+                    <div className="text-gray-500 dark:text-slate-400 text-xs truncate">{editingMessage.content}</div>
                   </div>
-                  <button onClick={() => { setEditingMessage(null); setInput(''); }} className="text-[#8696a0] hover:text-white shrink-0 p-1 touch-manipulation">
+                  <button onClick={() => { setEditingMessage(null); setInput(''); }} className="text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:text-white shrink-0 p-1 touch-manipulation">
                     <X size={16} />
                   </button>
                 </div>
@@ -654,17 +878,17 @@ export default function Home() {
 
               <form onSubmit={handleSendMessage} className="flex items-center gap-2">
                 <button type="button" onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                  className={`p-2.5 rounded-full transition shrink-0 touch-manipulation ${showEmojiPicker ? 'text-[#00a884]' : 'text-[#aebac1]'} hover:bg-[#2a3942]`}>
+                  className={`p-2.5 rounded-full transition shrink-0 touch-manipulation ${showEmojiPicker ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-600 dark:text-slate-300'} hover:bg-gray-200 dark:hover:bg-white/10`}>
                   <Smile size={22} />
                 </button>
 
-                <label className="cursor-pointer p-2.5 text-[#aebac1] hover:text-[#00a884] hover:bg-[#2a3942] rounded-full transition shrink-0 touch-manipulation">
+                <label className="cursor-pointer p-2.5 text-gray-600 dark:text-slate-300 hover:text-indigo-600 dark:text-indigo-400 hover:bg-gray-200 dark:hover:bg-white/10 rounded-full transition shrink-0 touch-manipulation">
                   <Paperclip size={22} />
                   <input type="file" accept="image/*" className="hidden" onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (!file || !activeRoom) return;
                     const fd = new FormData();
-                    fd.append('image', file);
+                    fd.append('file', file);
                     api.post('/upload', fd, {
                       headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${user.token}` }
                     }).then(res => {
@@ -673,37 +897,69 @@ export default function Home() {
                   }} />
                 </label>
 
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={input}
-                  onChange={(e) => { setInput(e.target.value); handleTyping(); }}
-                  placeholder="Type a message"
-                  className="flex-1 min-w-0 px-4 py-2.5 rounded-lg bg-[#2a3942] text-[#e9edef] placeholder-[#8696a0] focus:outline-none text-base border-none"
-                  style={{ fontSize: '16px' }}
-                />
+                {!isRecording ? (
+                  <>
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      value={input}
+                      onChange={(e) => { setInput(e.target.value); handleTyping(); }}
+                      placeholder="Type a message"
+                      className="flex-1 min-w-0 px-4 py-2.5 rounded-2xl bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm text-gray-800 dark:text-slate-100 placeholder-[#8696a0] focus:outline-none text-base border-none"
+                      style={{ fontSize: '16px' }}
+                    />
+                  </>
+                ) : (
+                  <div className="flex-1 flex items-center bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm rounded-2xl px-4 py-2.5">
+                    <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse mr-3"></div>
+                    <span className="text-gray-900 dark:text-white font-mono text-sm">{formatRecordingTime(recordingTime)}</span>
+                    <div className="flex-1"></div>
+                    <button type="button" onClick={cancelRecording} className="text-gray-500 hover:text-red-500 p-1 mr-2 touch-manipulation transition-colors">
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                )}
 
-                <button
-                  type="submit"
-                  disabled={!input.trim()}
-                  className="p-2.5 bg-[#00a884] hover:bg-[#02be9b] disabled:bg-[#2a3942] disabled:text-[#8696a0] text-white rounded-full transition shrink-0 touch-manipulation"
-                >
-                  <Send size={20} />
-                </button>
+                {input.trim() ? (
+                  <button
+                    type="submit"
+                    disabled={isUploadingAudio}
+                    className="p-2.5 bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] hover:bg-indigo-600 dark:hover:bg-indigo-400 disabled:bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm disabled:text-gray-500 dark:text-slate-400 text-white rounded-full transition shrink-0 touch-manipulation"
+                  >
+                    {isUploadingAudio ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                  </button>
+                ) : isRecording ? (
+                  <button
+                    type="button"
+                    onClick={stopAndSendRecording}
+                    disabled={isUploadingAudio}
+                    className="p-2.5 bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] hover:bg-indigo-600 dark:hover:bg-indigo-400 disabled:bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm disabled:text-gray-500 dark:text-slate-400 text-white rounded-full transition shrink-0 touch-manipulation"
+                  >
+                    {isUploadingAudio ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={startRecording}
+                    className="p-2.5 bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] hover:bg-indigo-600 dark:hover:bg-indigo-400 text-white rounded-full transition shrink-0 touch-manipulation"
+                  >
+                    <Mic size={20} />
+                  </button>
+                )}
               </form>
             </div>
           </>
         ) : (
           /* Welcome screen */
-          <div className="flex-1 flex flex-col items-center justify-center bg-[#222e35]">
-            <div className="bg-[#2a3942] p-10 rounded-full mb-6">
-              <MessageSquare size={64} className="text-[#00a884]" />
+          <div className="flex-1 flex flex-col items-center justify-center bg-gray-50 dark:bg-slate-950">
+            <div className="bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm p-10 rounded-full mb-6">
+              <MessageSquare size={64} className="text-indigo-600 dark:text-indigo-400" />
             </div>
-            <h2 className="text-[#e9edef] text-3xl font-light mb-3">WhatsApp Web</h2>
-            <p className="text-[#8696a0] text-sm text-center max-w-sm px-4">
+            <h2 className="text-gray-800 dark:text-slate-100 text-3xl font-light mb-3">WhatsApp Web</h2>
+            <p className="text-gray-500 dark:text-slate-400 text-sm text-center max-w-sm px-4">
               Send and receive messages without keeping your phone online.
             </p>
-            <div className="mt-6 flex items-center gap-2 text-[#8696a0] text-xs">
+            <div className="mt-6 flex items-center gap-2 text-gray-500 dark:text-slate-400 text-xs">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
               End-to-end encrypted
             </div>
@@ -712,149 +968,191 @@ export default function Home() {
       </div>
 
       {/* ========== GROUP MODAL ========== */}
-      {showGroupModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
-          <div className="bg-[#111b21] rounded-t-2xl sm:rounded-xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl">
-            <div className="px-5 py-4 border-b border-[#202c33] flex items-center justify-between">
-              <h2 className="text-white font-semibold text-lg">New Group</h2>
-              <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); setSelectedUsers([]); }}
-                className="text-[#aebac1] hover:text-white p-1 rounded-full hover:bg-[#2a3942] touch-manipulation">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="px-5 py-4">
-              <input
-                className="w-full bg-[#2a3942] text-white placeholder-[#8696a0] px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00a884] text-base border-none"
-                placeholder="Group name"
-                value={newGroupName}
-                onChange={e => setNewGroupName(e.target.value)}
-                style={{ fontSize: '16px' }}
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-3 pb-2">
-              <p className="text-[#8696a0] text-xs px-2 mb-2 uppercase font-semibold tracking-wider">Add participants</p>
-              <FetchUsersEffect user={user} setAllUsers={setAllUsers} />
-              {allUsers.filter(u => u._id !== user._id).map(u => {
-                const online = isOnline(u._id);
-                const checked = selectedUsers.includes(u._id);
-                return (
-                  <label key={u._id} htmlFor={`gu-${u._id}`}
-                    className="flex items-center px-3 py-3 rounded-lg hover:bg-[#2a3942] cursor-pointer transition-colors">
-                    <div className="relative mr-3 shrink-0">
-                      <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-white font-bold">
-                        {u.username.charAt(0).toUpperCase()}
-                      </div>
-                      {online && <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-[#111b21]" />}
-                    </div>
-                    <span className="flex-1 text-[#e9edef] text-sm">{u.username}</span>
-                    <input type="checkbox" id={`gu-${u._id}`} className="hidden"
-                      checked={checked}
-                      onChange={e => {
-                        if (e.target.checked) setSelectedUsers([...selectedUsers, u._id]);
-                        else setSelectedUsers(selectedUsers.filter(id => id !== u._id));
-                      }}
-                    />
-                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors
-                      ${checked ? 'bg-[#00a884] border-[#00a884]' : 'border-[#8696a0]'}`}>
-                      {checked && <Check size={12} className="text-white" />}
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-
-            <div className="px-5 py-4 border-t border-[#202c33]">
-              <button
-                onClick={() => {
-                  if (!newGroupName.trim()) return alert('Please enter a group name');
-                  if (selectedUsers.length === 0) return alert('Please select at least one participant');
-                  api.post('/rooms', { name: newGroupName, type: 'group', participants: selectedUsers }, {
-                    headers: { Authorization: `Bearer ${user.token}` }
-                  }).then(res => {
-                    setRooms([...rooms, res.data]);
-                    setShowGroupModal(false);
-                    setNewGroupName('');
-                    setSelectedUsers([]);
-                    handleJoinRoom(res.data);
-                  }).catch(err => alert(err.response?.data?.message || 'Failed to create group'));
-                }}
-                className="w-full bg-[#00a884] hover:bg-[#02be9b] text-white font-semibold py-3 rounded-xl transition touch-manipulation"
-              >
-                Create Group {selectedUsers.length > 0 && `(${selectedUsers.length})`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========== PROFILE MODAL ========== */}
-      {showProfileModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
-          <div className="bg-[#111b21] rounded-t-2xl sm:rounded-xl w-full max-w-md shadow-2xl">
-            <div className="px-5 py-4 border-b border-[#202c33] flex items-center justify-between">
-              <h2 className="text-white font-semibold text-lg">Profile</h2>
-              <button onClick={() => setShowProfileModal(false)}
-                className="text-[#aebac1] hover:text-white p-1 rounded-full hover:bg-[#2a3942] touch-manipulation">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-5">
-              {/* Avatar */}
-              <div className="flex flex-col items-center mb-6">
-                <div className="relative h-24 w-24 mb-2">
-                  {user.avatarUrl ? (
-                    <img src={user.avatarUrl} alt="Profile" className="h-full w-full rounded-full object-cover" />
-                  ) : (
-                    <div className="h-full w-full rounded-full bg-[#6b7280] flex items-center justify-center text-3xl text-white font-bold">
-                      {user.username.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <label className="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/40 active:bg-black/40 rounded-full cursor-pointer transition group touch-manipulation">
-                    <Pencil size={20} className="text-white opacity-0 group-hover:opacity-100 group-active:opacity-100" />
-                    <input type="file" accept="image/*" className="hidden" onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      const fd = new FormData();
-                      fd.append('image', file);
-                      api.post('/upload', fd, {
-                        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${user.token}` }
-                      }).then(res => {
-                        api.put('/users/profile', { avatarUrl: res.data.fileUrl }, { headers: { Authorization: `Bearer ${user.token}` } })
-                          .then(() => updateUser({ avatarUrl: res.data.fileUrl }));
-                      }).catch(() => alert('Failed to upload'));
-                    }} />
-                  </label>
-                </div>
-                <p className="text-white font-semibold text-lg">{user.username}</p>
-                <p className="text-[#8696a0] text-sm">{user.email}</p>
+      {
+        showGroupModal && (
+          <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+            <div className="bg-gray-50 dark:bg-slate-950 rounded-t-2xl sm:rounded-xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl">
+              <div className="px-5 py-4 border-b border-gray-200 dark:border-white/10 flex items-center justify-between">
+                <h2 className="text-gray-900 dark:text-white font-semibold text-lg">New Group</h2>
+                <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); setSelectedUsers([]); }}
+                  className="text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white p-1 rounded-full hover:bg-gray-200 dark:hover:bg-white/10 touch-manipulation">
+                  <X size={20} />
+                </button>
               </div>
 
-              {/* Bio */}
-              <div className="mb-4">
-                <label className="text-[#00a884] text-xs font-semibold uppercase tracking-wider block mb-2">About</label>
-                <textarea
-                  className="w-full bg-[#2a3942] text-[#e9edef] placeholder-[#8696a0] px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00a884] text-sm resize-none border-none"
-                  rows={3}
-                  defaultValue={user.bio || ''}
-                  onBlur={(e) => {
-                    const newBio = e.target.value;
-                    if (newBio === user.bio) return;
-                    api.put('/users/profile', { bio: newBio }, { headers: { Authorization: `Bearer ${user.token}` } })
-                      .then(() => updateUser({ bio: newBio }))
-                      .catch(() => alert('Failed to update bio'));
-                  }}
-                  placeholder="Hey there! I am using WhatsApp."
+              <div className="px-5 py-4">
+                <input
+                  className="w-full bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-[#8696a0] px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#00a884] text-base border-none"
+                  placeholder="Group name"
+                  value={newGroupName}
+                  onChange={e => setNewGroupName(e.target.value)}
                   style={{ fontSize: '16px' }}
                 />
               </div>
+
+              <div className="flex-1 overflow-y-auto px-3 pb-2">
+                <p className="text-gray-500 dark:text-slate-400 text-xs px-2 mb-2 uppercase font-semibold tracking-wider">Add participants</p>
+                <FetchUsersEffect user={user} setAllUsers={setAllUsers} />
+                {allUsers.filter(u => u._id !== user._id).map(u => {
+                  const online = isOnline(u._id);
+                  const checked = selectedUsers.includes(u._id);
+                  return (
+                    <label key={u._id} htmlFor={`gu-${u._id}`}
+                      className="flex items-center px-3 py-3 rounded-2xl hover:bg-gray-200 dark:hover:bg-white/10 cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.02]">
+                      <div className="relative mr-3 shrink-0">
+                        <div className="h-10 w-10 rounded-full bg-[#6b7280] flex items-center justify-center text-gray-900 dark:text-white font-bold">
+                          {u.username.charAt(0).toUpperCase()}
+                        </div>
+                        {online && <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white dark:border-slate-950" />}
+                      </div>
+                      <span className="flex-1 text-gray-800 dark:text-slate-100 text-sm">{u.username}</span>
+                      <input type="checkbox" id={`gu-${u._id}`} className="hidden"
+                        checked={checked}
+                        onChange={e => {
+                          if (e.target.checked) setSelectedUsers([...selectedUsers, u._id]);
+                          else setSelectedUsers(selectedUsers.filter(id => id !== u._id));
+                        }}
+                      />
+                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all duration-300 ease-in-out hover:scale-[1.02]
+                      ${checked ? 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] border-indigo-500' : 'border-[#8696a0]'}`}>
+                        {checked && <Check size={12} className="text-white" />}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <div className="px-5 py-4 border-t border-gray-200 dark:border-white/10">
+                <button
+                  onClick={() => {
+                    if (!newGroupName.trim()) return alert('Please enter a group name');
+                    if (selectedUsers.length === 0) return alert('Please select at least one participant');
+                    api.post('/rooms', { name: newGroupName, type: 'group', participants: selectedUsers }, {
+                      headers: { Authorization: `Bearer ${user.token}` }
+                    }).then(res => {
+                      setRooms([...rooms, res.data]);
+                      setShowGroupModal(false);
+                      setNewGroupName('');
+                      setSelectedUsers([]);
+                      handleJoinRoom(res.data);
+                    }).catch(err => alert(err.response?.data?.message || 'Failed to create group'));
+                  }}
+                  className="w-full bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)] hover:bg-indigo-600 dark:hover:bg-indigo-400 text-white font-semibold py-3 rounded-xl transition touch-manipulation"
+                >
+                  Create Group {selectedUsers.length > 0 && `(${selectedUsers.length})`}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </div>
+        )
+      }
+
+      {/* ========== PROFILE MODAL ========== */}
+      {
+        showProfileModal && (
+          <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+            <div className="bg-gray-50 dark:bg-slate-950 rounded-t-2xl sm:rounded-xl w-full max-w-md shadow-2xl">
+              <div className="px-5 py-4 border-b border-gray-200 dark:border-white/10 flex items-center justify-between">
+                <h2 className="text-gray-900 dark:text-white font-semibold text-lg">Profile</h2>
+                <button onClick={() => setShowProfileModal(false)}
+                  className="text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:text-white p-1 rounded-full hover:bg-gray-200 dark:hover:bg-white/10 touch-manipulation">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-5">
+                {/* Avatar */}
+                <div className="flex flex-col items-center mb-6">
+                  <div className="relative h-24 w-24 mb-2">
+                    {user.avatarUrl ? (
+                      <img src={user.avatarUrl} alt="Profile" className="h-full w-full rounded-full object-cover" />
+                    ) : (
+                      <div className="h-full w-full rounded-full bg-[#6b7280] flex items-center justify-center text-3xl text-gray-900 dark:text-white font-bold">
+                        {user.username.charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <label className="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/40 active:bg-black/40 rounded-full cursor-pointer transition group touch-manipulation">
+                      <Pencil size={20} className="text-gray-900 dark:text-white opacity-0 group-hover:opacity-100 group-active:opacity-100" />
+                      <input type="file" accept="image/*" className="hidden" onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const fd = new FormData();
+                        fd.append('image', file);
+                        api.post('/upload', fd, {
+                          headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${user.token}` }
+                        }).then(res => {
+                          api.put('/users/profile', { avatarUrl: res.data.fileUrl }, { headers: { Authorization: `Bearer ${user.token}` } })
+                            .then(() => updateUser({ avatarUrl: res.data.fileUrl }));
+                        }).catch(() => alert('Failed to upload'));
+                      }} />
+                    </label>
+                  </div>
+                  <p className="text-gray-900 dark:text-white font-semibold text-lg">{user.username}</p>
+                  <p className="text-gray-500 dark:text-slate-400 text-sm">{user.email}</p>
+                </div>
+
+                {/* Bio */}
+                <div className="mb-4">
+                  <label className="text-indigo-600 dark:text-indigo-400 text-xs font-semibold uppercase tracking-wider block mb-2">About</label>
+                  <textarea
+                    className="w-full bg-gray-100/80 dark:bg-white dark:bg-slate-800/80 backdrop-blur-sm text-gray-800 dark:text-slate-100 placeholder-[#8696a0] px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#00a884] text-sm resize-none border-none"
+                    rows={3}
+                    defaultValue={user.bio || ''}
+                    onBlur={(e) => {
+                      const newBio = e.target.value;
+                      if (newBio === user.bio) return;
+                      api.put('/users/profile', { bio: newBio }, { headers: { Authorization: `Bearer ${user.token}` } })
+                        .then(() => updateUser({ bio: newBio }))
+                        .catch(() => alert('Failed to update bio'));
+                    }}
+                    placeholder="Hey there! I am using WhatsApp."
+                    style={{ fontSize: '16px' }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      }
+      {/* WALLPAPER MODAL */}
+      {
+        showWallpaperModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden border border-gray-200 dark:border-white/10 flex flex-col max-h-[90vh]">
+              <div className="px-6 py-4 border-b border-gray-200 dark:border-white/10 flex justify-between items-center bg-gray-50 dark:bg-slate-900/50">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Chat Wallpaper</h3>
+                <button onClick={() => setShowWallpaperModal(false)} className="text-gray-500 hover:text-gray-900 dark:text-slate-400 dark:hover:text-white transition touch-manipulation">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto">
+                <div className="grid grid-cols-2 gap-4">
+                  {WALLPAPER_OPTIONS.map((opt, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setWallpaper(opt.value);
+                        setShowWallpaperModal(false);
+                      }}
+                      className={`flex flex-col items-center gap-2 touch-manipulation group`}
+                    >
+                      <div
+                        className={`w-full aspect-video rounded-xl border-2 transition-all duration-300 ${wallpaper === opt.value ? 'border-indigo-500 scale-105 shadow-[0_0_15px_rgba(99,102,241,0.4)]' : 'border-gray-200 dark:border-white/10 group-hover:border-gray-400 dark:group-hover:border-white/30'}`}
+                        style={opt.value !== 'none' ? { background: opt.value, backgroundSize: opt.value.includes('url') ? 'auto' : 'cover' } : { backgroundColor: theme === 'dark' ? '#0f172a' : '#f3f4f6' }}
+                      />
+                      <span className={`text-xs ${wallpaper === opt.value ? 'text-indigo-600 dark:text-indigo-400 font-semibold' : 'text-gray-600 dark:text-slate-400'}`}>{opt.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )
+      }
+
+    </div >
   );
 }
 

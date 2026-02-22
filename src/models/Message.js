@@ -12,7 +12,7 @@ const messageSchema = new mongoose.Schema(
         },
         type: {
             type: String,
-            enum: ['text', 'image'],
+            enum: ['text', 'image', 'audio'],
             default: 'text'
         },
         fileUrl: {
@@ -42,6 +42,10 @@ const messageSchema = new mongoose.Schema(
             default: []
         },
         readBy: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        }],
+        deliveredTo: [{
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User'
         }]

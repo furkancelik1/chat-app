@@ -29,7 +29,7 @@ app.use("/api/rooms", require("./routes/roomRoutes"));
 app.use("/api/messages", require("./routes/messageRoutes"));
 
 // Upload Endpoint
-app.post("/api/upload", upload.single("image"), (req, res) => {
+app.post("/api/upload", upload.single("file"), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "Please upload a file" });

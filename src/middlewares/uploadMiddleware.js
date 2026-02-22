@@ -21,10 +21,10 @@ const storage = multer.diskStorage({
 
 // File filter
 const fileFilter = (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('audio/') || file.mimetype.startsWith('video/')) {
         cb(null, true);
     } else {
-        cb(new Error('Not an image! Please upload an image.'), false);
+        cb(new Error('Not an image or audio file! Please upload supported media.'), false);
     }
 };
 
